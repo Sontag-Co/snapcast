@@ -22,6 +22,7 @@
 #include "client_settings.hpp"
 #include "common/endian.hpp"
 #include "stream.hpp"
+#include "player/channel_mode.hpp"
 
 // 3rd party headers
 #include <boost/asio/io_context.hpp>
@@ -108,6 +109,7 @@ protected:
     std::shared_ptr<Stream> stream_;
     std::thread playerThread_;
     ClientSettings::Player settings_;
+    ChannelMode channel_mode_;
     Player::Volume volume_;
     double volCorrection_;
     volume_callback onVolumeChanged_;

@@ -56,8 +56,12 @@ namespace player
 static constexpr auto LOG_TAG = "Player";
 
 Player::Player(boost::asio::io_context& io_context, const ClientSettings::Player& settings, std::shared_ptr<Stream> stream)
-    : io_context_(io_context), active_(false), stream_(stream), settings_(settings), volCorrection_(1.0)
+    : io_context_(io_context), active_(false), stream_(stream), settings_(settings), channel_mode_(parseChannelMode(settings.parameter)), volCorrection_(1.0)
 {
+    if (channel_mode_ != ChannelMode::stereo && stream_->getFormat().channels() > 2)
+        throw SnapException("Channel mode " + string(channelModeToString(channel_mode_)) + " requires a mono or stereo stream; got " +
+                            cpt::to_string(stream_->getFormat().channels()) + " channels");
+
     string sharing_mode;
     switch (settings_.sharing_mode)
     {
@@ -100,6 +104,7 @@ Player::Player(boost::asio::io_context& io_context, const ClientSettings::Player
             break;
     }
     LOG(INFO, LOG_TAG) << "Mixer mode: " << mixer << ", parameters: " << not_empty(settings_.mixer.parameter) << "\n";
+    LOG(INFO, LOG_TAG) << "Channel mode: " << channelModeToString(channel_mode_) << "\n";
     LOG(INFO, LOG_TAG) << "Sampleformat: " << (settings_.sample_format.isInitialized() ? settings_.sample_format.toString() : stream->getFormat().toString())
                        << ", stream: " << stream->getFormat().toString() << "\n";
 }

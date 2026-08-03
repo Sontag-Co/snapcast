@@ -6,6 +6,7 @@ set(CLIENT_SOURCES
     time_provider.cpp
     decoder/pcm_decoder.cpp
     decoder/null_decoder.cpp
+    player/channel_mode.cpp
     player/player.cpp
     player/file_player.cpp)
 

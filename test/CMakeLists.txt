@@ -15,7 +15,9 @@ set(TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/server/streamreader/control_error.cpp
     ${CMAKE_SOURCE_DIR}/server/streamreader/properties.cpp
     ${CMAKE_SOURCE_DIR}/server/streamreader/metadata.cpp
-    ${CMAKE_SOURCE_DIR}/server/streamreader/stream_uri.cpp)
+    ${CMAKE_SOURCE_DIR}/server/streamreader/stream_uri.cpp
+    ${CMAKE_SOURCE_DIR}/client/player/channel_mode.cpp
+    ${CMAKE_SOURCE_DIR}/common/sample_format.cpp)
 
 add_executable(snapcast_test ${TEST_SOURCES})
 target_link_libraries(snapcast_test ${TEST_LIBRARIES})

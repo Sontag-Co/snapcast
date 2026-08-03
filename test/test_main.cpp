@@ -24,6 +24,7 @@
 // local headers
 #include "common/aixlog.hpp"
 #include "common/utils/string_utils.hpp"
+#include "client/player/channel_mode.hpp"
 #include "server/streamreader/control_error.hpp"
 #include "server/streamreader/properties.hpp"
 #include "server/streamreader/stream_uri.hpp"
@@ -32,6 +33,10 @@
 
 // standard headers
 #include <regex>
+#include <array>
+#include <cstring>
+#include <utility>
+#include <vector>
 
 
 using namespace std;
@@ -41,6 +46,127 @@ TEST_CASE("String utils")
 {
     using namespace utils::string;
     REQUIRE(ltrim_copy(" test") == "test");
+}
+
+
+template <typename T>
+static void writeTestSample(std::vector<char>& buffer, size_t offset, T value)
+{
+    std::memcpy(buffer.data() + offset, &value, sizeof(value));
+}
+
+
+template <typename T>
+static T readTestSample(const std::vector<char>& buffer, size_t offset)
+{
+    T value;
+    std::memcpy(&value, buffer.data() + offset, sizeof(value));
+    return value;
+}
+
+
+TEST_CASE("PCM channel modes")
+{
+    using player::ChannelMode;
+    using player::applyChannelMode;
+    using player::parseChannelMode;
+
+    REQUIRE(parseChannelMode("") == ChannelMode::stereo);
+    REQUIRE(parseChannelMode("channel=left,future=value") == ChannelMode::left);
+    REQUIRE(parseChannelMode("future=value,channel=right") == ChannelMode::right);
+    REQUIRE(parseChannelMode("channel=mono") == ChannelMode::mono);
+    REQUIRE_THROWS(parseChannelMode("channel"));
+    REQUIRE_THROWS(parseChannelMode("channel=invalid"));
+
+    const std::array<std::array<int32_t, 2>, 3> input = {{{100, 1000}, {-200, 2000}, {300, -3000}}};
+    const std::array<std::array<int32_t, 2>, 3> expectedLeft = {{{100, 100}, {-200, -200}, {300, 300}}};
+    const std::array<std::array<int32_t, 2>, 3> expectedRight = {{{1000, 1000}, {2000, 2000}, {-3000, -3000}}};
+    const std::array<std::array<int32_t, 2>, 3> expectedMono = {{{550, 550}, {900, 900}, {-1350, -1350}}};
+
+    const auto modes = std::array<std::pair<ChannelMode, std::array<std::array<int32_t, 2>, 3>>, 3>{
+        std::make_pair(ChannelMode::left, expectedLeft), std::make_pair(ChannelMode::right, expectedRight), std::make_pair(ChannelMode::mono, expectedMono)};
+    for (const auto& modeAndExpected : modes)
+    {
+        std::vector<char> buffer(input.size() * sizeof(int32_t) * 2);
+        for (size_t frame = 0; frame < input.size(); ++frame)
+        {
+            writeTestSample<int32_t>(buffer, frame * 8, input[frame][0]);
+            writeTestSample<int32_t>(buffer, frame * 8 + 4, input[frame][1]);
+        }
+        applyChannelMode(buffer.data(), input.size(), SampleFormat(48000, 32, 2), modeAndExpected.first);
+        for (size_t frame = 0; frame < input.size(); ++frame)
+        {
+            REQUIRE(readTestSample<int32_t>(buffer, frame * 8) == modeAndExpected.second[frame][0]);
+            REQUIRE(readTestSample<int32_t>(buffer, frame * 8 + 4) == modeAndExpected.second[frame][1]);
+        }
+    }
+
+    std::vector<char> stereoBuffer(input.size() * sizeof(int32_t) * 2);
+    for (size_t frame = 0; frame < input.size(); ++frame)
+    {
+        writeTestSample<int32_t>(stereoBuffer, frame * 8, input[frame][0]);
+        writeTestSample<int32_t>(stereoBuffer, frame * 8 + 4, input[frame][1]);
+    }
+    const auto originalStereo = stereoBuffer;
+    applyChannelMode(stereoBuffer.data(), input.size(), SampleFormat(48000, 32, 2), ChannelMode::stereo);
+    REQUIRE(stereoBuffer == originalStereo);
+    applyChannelMode(stereoBuffer.data(), 0, SampleFormat(48000, 32, 2), ChannelMode::mono);
+    REQUIRE(stereoBuffer == originalStereo);
+}
+
+
+TEST_CASE("PCM channel modes cover sample widths and channel counts")
+{
+    using player::ChannelMode;
+    using player::applyChannelMode;
+
+    {
+        std::vector<char> buffer(2);
+        writeTestSample<int8_t>(buffer, 0, 100);
+        writeTestSample<int8_t>(buffer, 1, -100);
+        applyChannelMode(buffer.data(), 1, SampleFormat(48000, 8, 2), ChannelMode::mono);
+        REQUIRE(readTestSample<int8_t>(buffer, 0) == 0);
+        REQUIRE(readTestSample<int8_t>(buffer, 1) == 0);
+    }
+    {
+        std::vector<char> buffer(8);
+        writeTestSample<int16_t>(buffer, 0, 32767);
+        writeTestSample<int16_t>(buffer, 2, -32768);
+        writeTestSample<int16_t>(buffer, 4, -32768);
+        writeTestSample<int16_t>(buffer, 6, -32768);
+        applyChannelMode(buffer.data(), 2, SampleFormat(48000, 16, 2), ChannelMode::mono);
+        REQUIRE(readTestSample<int16_t>(buffer, 0) == 0);
+        REQUIRE(readTestSample<int16_t>(buffer, 2) == 0);
+        REQUIRE(readTestSample<int16_t>(buffer, 4) == -32768);
+        REQUIRE(readTestSample<int16_t>(buffer, 6) == -32768);
+    }
+    {
+        std::vector<char> buffer(8);
+        writeTestSample<int32_t>(buffer, 0, 0x007fffff);
+        writeTestSample<int32_t>(buffer, 4, static_cast<int32_t>(0xff800000));
+        applyChannelMode(buffer.data(), 1, SampleFormat(48000, 24, 2), ChannelMode::mono);
+        REQUIRE(readTestSample<int32_t>(buffer, 0) == 0);
+        REQUIRE(readTestSample<int32_t>(buffer, 4) == 0);
+    }
+    {
+        std::vector<char> buffer(8);
+        writeTestSample<int32_t>(buffer, 0, 0x7fffffff);
+        writeTestSample<int32_t>(buffer, 4, 0x7fffffff);
+        applyChannelMode(buffer.data(), 1, SampleFormat(48000, 32, 2), ChannelMode::mono);
+        REQUIRE(readTestSample<int32_t>(buffer, 0) == 0x7fffffff);
+        REQUIRE(readTestSample<int32_t>(buffer, 4) == 0x7fffffff);
+    }
+
+    std::vector<char> monoBuffer(2);
+    writeTestSample<int16_t>(monoBuffer, 0, 1234);
+    const auto monoOriginal = monoBuffer;
+    applyChannelMode(monoBuffer.data(), 1, SampleFormat(48000, 16, 1), ChannelMode::right);
+    REQUIRE(monoBuffer == monoOriginal);
+
+    std::vector<char> multichannelBuffer(12, static_cast<char>(0x5a));
+    const auto multichannelOriginal = multichannelBuffer;
+    applyChannelMode(multichannelBuffer.data(), 1, SampleFormat(48000, 16, 3), ChannelMode::left);
+    REQUIRE(multichannelBuffer == multichannelOriginal);
 }
 
 

@@ -188,7 +188,9 @@ oboe::DataCallbackResult OboePlayer::onAudioReady(oboe::AudioStream* /*oboeStrea
         buffer = audio_data_.data();
     }
 
-    if (!stream_->getPlayerChunkOrSilence(buffer, delay, numFrames))
+    const bool chunkReady = stream_->getPlayerChunkOrSilence(buffer, delay, numFrames);
+    applyChannelMode(static_cast<char*>(buffer), numFrames, stream_->getFormat(), channel_mode_);
+    if (!chunkReady)
     {
         // LOG(INFO, LOG_TAG) << "Failed to get chunk. Playing silence.\n";
     }

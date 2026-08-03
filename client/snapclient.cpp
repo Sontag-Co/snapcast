@@ -381,6 +381,11 @@ int main(int argc, char** argv)
                      << " \"fragments=<number of buffers>\" - default 4, min 2\n";
             }
 #endif
+            else if (settings.player.player_name == "oboe" || settings.player.player_name == "opensl")
+            {
+                cout << "Options are a comma separated list of:\n"
+                     << " \"channel=[stereo|left|right|mono]\" - default stereo\n";
+            }
             else
             {
                 cout << "No options available for \"" << settings.player.player_name << "\n";
