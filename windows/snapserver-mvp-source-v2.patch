@@ -1,3 +1,12 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,4 +1,5 @@
+-cmake_minimum_required(VERSION 3.5)
++cmake_minimum_required(VERSION 3.15)
++cmake_policy(SET CMP0091 NEW)
+ 
+ project(
+   snapcast
 --- a/server/control_server.hpp
 +++ b/server/control_server.hpp
 @@ -25,6 +25,7 @@
