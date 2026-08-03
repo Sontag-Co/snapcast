@@ -1,0 +1,406 @@
+diff --git a/common/utils.hpp b/common/utils.hpp
+index 903f406..38fe62b 100644
+--- a/common/utils.hpp
++++ b/common/utils.hpp
+@@ -51,12 +51,19 @@
+ #include <sys/system_properties.h>
+ #endif
+ #ifdef WINDOWS
+-#include <chrono>
+-#include <direct.h>
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <winsock2.h>
++#include <ws2tcpip.h>
++#include <windows.h>
+ #include <iphlpapi.h>
+ #include <versionhelpers.h>
+-#include <windows.h>
+-#include <winsock2.h>
++#include <chrono>
++#include <direct.h>
+ #endif
+ 
+ 
+ diff --git a/server/config.cpp b/server/config.cpp
+index 1f450a7..30ab4df 100644
+--- a/server/config.cpp
++++ b/server/config.cpp
+@@ -27,10 +27,14 @@
+ 
+ // standard headers
+ #include <cerrno>
+-#include <fcntl.h>
++#include <filesystem>
+ #include <fstream>
++#ifndef WINDOWS
++#include <fcntl.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#include <unistd.h>
++#endif
+ 
+ using namespace std;
+ 
+@@ -44,6 +48,42 @@ Config::~Config()
+ 
+ void Config::init(const std::string& root_directory, const std::string& user, const std::string& group)
+ {
++#ifdef WINDOWS
++    namespace fs = std::filesystem;
++    fs::path dir;
++    if (!root_directory.empty())
++    {
++        dir = fs::path(root_directory);
++    }
++    else if (const char* local_app_data = std::getenv("LOCALAPPDATA"))
++    {
++        dir = fs::path(local_app_data) / "SoundTag";
++    }
++    else if (const char* user_profile = std::getenv("USERPROFILE"))
++    {
++        dir = fs::path(user_profile) / "AppData" / "Local" / "SoundTag";
++    }
++    else
++    {
++        dir = fs::temp_directory_path() / "SoundTag";
++    }
++
++    std::error_code ec;
++    fs::create_directories(dir, ec);
++    if (ec)
++        throw SnapException("failed to create settings directory: \"" + dir.string() + "\": " + ec.message());
++
++    filename_ = (dir / "server.json").string();
++    LOG(NOTICE) << "Settings file: \"" << filename_ << "\"\n";
++
++    std::ofstream touch(filename_, std::ios::app);
++    if (!touch.good())
++        throw std::runtime_error("failed to open file \"" + filename_ + "\"");
++    touch.close();
++
++    (void)user;
++    (void)group;
++#else
+     string dir;
+     if (!root_directory.empty())
+         dir = root_directory;
+@@ -55,9 +95,6 @@ void Config::init(const std::string& root_directory, const std::string& user, co
+     if (!dir.empty() && (dir.back() != '/'))
+         dir += "/";
+ 
+-    // if (dir.find("/var/lib/snapserver") == string::npos)
+-    //     dir += ".config/snapserver/";
+-
+     int status = utils::file::mkdirRecursive(dir.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
+     if ((status != 0) && (errno != EEXIST))
+         throw SnapException("failed to create settings directory: \"" + dir + "\": " + cpt::to_string(errno));
+@@ -87,6 +124,7 @@ void Config::init(const std::string& root_directory, const std::string& user, co
+             LOG(ERROR) << "Exception in chown: " << e.what() << "\n";
+         }
+     }
++#endif
+ 
+     try
+     {
+@@ -102,8 +140,6 @@ void Config::init(const std::string& root_directory, const std::string& user, co
+                 {
+                     GroupPtr group = make_shared<Group>();
+                     group->fromJson(jGroup);
+-                    // if (client->id.empty() || getClientInfo(client->id))
+-                    //     continue;
+                     groups.push_back(group);
+                 }
+             }
+@@ -115,7 +151,6 @@ void Config::init(const std::string& root_directory, const std::string& user, co
+     }
+ }
+ 
+-
+ void Config::save()
+ {
+     std::lock_guard<std::recursive_mutex> lock(mutex_);
+diff --git a/server/config.hpp b/server/config.hpp
+index 736bc0f..e5b2ab4 100644
+--- a/server/config.hpp
++++ b/server/config.hpp
+@@ -28,7 +28,9 @@
+ #include <memory>
+ #include <mutex>
+ #include <string>
++#ifndef WINDOWS
+ #include <sys/time.h>
++#endif
+ #include <vector>
+ 
+ 
+ diff --git a/server/control_server.cpp b/server/control_server.cpp
+index 03b2db7..909cc85 100644
+--- a/server/control_server.cpp
++++ b/server/control_server.cpp
+@@ -132,11 +132,17 @@ void ControlServer::handleAccept(tcp::socket socket, Args&&... args)
+ {
+     try
+     {
++#ifdef WINDOWS
++        const DWORD timeout_ms = 5000;
++        setsockopt(socket.native_handle(), SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
++        setsockopt(socket.native_handle(), SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
++#else
+         struct timeval tv;
+         tv.tv_sec = 5;
+         tv.tv_usec = 0;
+         setsockopt(socket.native_handle(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+         setsockopt(socket.native_handle(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
++#endif
+         //	socket->set_option(boost::asio::ip::tcp::no_delay(false));
+         LOG(NOTICE, LOG_TAG) << "ControlServer::NewConnection: " << socket.remote_endpoint().address().to_string() << endl;
+         shared_ptr<SessionType> session = make_shared<SessionType>(this, std::move(socket), std::forward<Args>(args)...);
+@@ -161,7 +167,7 @@ void ControlServer::start()
+             {
+                 LOG(INFO, LOG_TAG) << "Creating TCP acceptor for address: " << address << ", port: " << tcp_settings_.port << "\n";
+                 acceptor_tcp_.emplace_back(make_unique<tcp::acceptor>(boost::asio::make_strand(io_context_.get_executor()),
+-                                                                      tcp::endpoint(boost::asio::ip::address::from_string(address), tcp_settings_.port)));
++                                                                      tcp::endpoint(boost::asio::ip::make_address(address), tcp_settings_.port)));
+             }
+             catch (const boost::system::system_error& e)
+             {
+@@ -177,7 +183,7 @@ void ControlServer::start()
+             {
+                 LOG(INFO, LOG_TAG) << "Creating HTTP acceptor for address: " << address << ", port: " << http_settings_.port << "\n";
+                 acceptor_http_.emplace_back(make_unique<tcp::acceptor>(boost::asio::make_strand(io_context_.get_executor()),
+-                                                                       tcp::endpoint(boost::asio::ip::address::from_string(address), http_settings_.port)));
++                                                                       tcp::endpoint(boost::asio::ip::make_address(address), http_settings_.port)));
+             }
+             catch (const boost::system::system_error& e)
+             {
+diff --git a/server/snapserver.cpp b/server/snapserver.cpp
+index a331bb2..a577b60 100644
+--- a/server/snapserver.cpp
++++ b/server/snapserver.cpp
+@@ -39,7 +39,9 @@
+ // standard headers
+ #include <chrono>
+ #include <memory>
++#ifndef WINDOWS
+ #include <sys/resource.h>
++#endif
+ 
+ 
+ using namespace std;
+@@ -58,8 +60,15 @@ int main(int argc, char* argv[])
+     try
+     {
+         ServerSettings settings;
++#ifdef WINDOWS
++        std::string pcmSource = "tcp://127.0.0.1:4953?mode=server&name=Windows&sampleformat=48000:16:2&codec=pcm&chunk_ms=20";
++        std::string config_file = "snapserver.conf";
++        settings.http.enabled = false;
++        settings.stream.codec = "pcm";
++#else
+         std::string pcmSource = "pipe:///tmp/snapfifo?name=default";
+         std::string config_file = "/etc/snapserver.conf";
++#endif
+ 
+         OptionParser op("Allowed options");
+         auto helpSwitch = op.add<Switch>("h", "help", "Produce help message, use -hh to show options from config file");
+@@ -321,12 +330,22 @@ int main(int argc, char* argv[])
+         LOG(INFO, LOG_TAG) << "Number of threads: " << settings.server.threads << ", hw threads: " << std::thread::hardware_concurrency() << "\n";
+ 
+         // Construct a signal set registered for process termination.
++#ifdef WINDOWS
++        boost::asio::signal_set signals(io_context, SIGINT, SIGTERM);
++#else
+         boost::asio::signal_set signals(io_context, SIGHUP, SIGINT, SIGTERM);
++#endif
+         signals.async_wait(
+             [&io_context](const boost::system::error_code& ec, int signal)
+             {
+             if (!ec)
++            {
++#ifdef WINDOWS
++                LOG(INFO, LOG_TAG) << "Received signal " << signal << "\n";
++#else
+                 LOG(INFO, LOG_TAG) << "Received signal " << signal << ": " << strsignal(signal) << "\n";
++#endif
++            }
+             else
+                 LOG(INFO, LOG_TAG) << "Failed to wait for signal, error: " << ec.message() << "\n";
+             io_context.stop();
+diff --git a/server/streamreader/pcm_stream.cpp b/server/streamreader/pcm_stream.cpp
+index 5a2d1a1..1574447 100644
+--- a/server/streamreader/pcm_stream.cpp
++++ b/server/streamreader/pcm_stream.cpp
+@@ -68,10 +68,14 @@ PcmStream::PcmStream(PcmStream::Listener* pcmListener, boost::asio::io_context&
+ 
+     if (uri_.query.find(kControlScript) != uri_.query.end())
+     {
++#ifdef WINDOWS
++        throw SnapException("Control scripts are not supported by the Windows server MVP");
++#else
+         std::string params;
+         if (uri_.query.find(kControlScriptParams) != uri_.query.end())
+             params = uri_.query[kControlScriptParams];
+         stream_ctrl_ = std::make_unique<ScriptStreamControl>(strand_, uri_.query[kControlScript], params);
++#endif
+     }
+ 
+     if (uri_.query.find(kUriChunkMs) != uri_.query.end())
+diff --git a/server/streamreader/pcm_stream.hpp b/server/streamreader/pcm_stream.hpp
+index 0f0802f..6796b80 100644
+--- a/server/streamreader/pcm_stream.hpp
++++ b/server/streamreader/pcm_stream.hpp
+@@ -35,6 +35,7 @@
+ #include <boost/asio/io_context.hpp>
+ #include <boost/asio/read_until.hpp>
+ #include <boost/asio/steady_timer.hpp>
++#include <boost/asio/strand.hpp>
+ 
+ // standard headers
+ #include <atomic>
+diff --git a/server/streamreader/stream_control.cpp b/server/streamreader/stream_control.cpp
+index 7aebe50..95b2d9f 100644
+--- a/server/streamreader/stream_control.cpp
++++ b/server/streamreader/stream_control.cpp
+@@ -130,6 +130,7 @@ void StreamControl::onLog(std::string message)
+ 
+ 
+ 
++#ifndef WINDOWS
+ ScriptStreamControl::ScriptStreamControl(const boost::asio::any_io_executor& executor, const std::string& script, const std::string& params)
+     : StreamControl(executor), script_(script), params_(params)
+ {
+@@ -236,5 +237,6 @@ void ScriptStreamControl::stdoutReadLine()
+     });
+ }
+ 
++#endif
+ 
+ } // namespace streamreader
+diff --git a/server/streamreader/stream_control.hpp b/server/streamreader/stream_control.hpp
+index ec719e1..ef01281 100644
+--- a/server/streamreader/stream_control.hpp
++++ b/server/streamreader/stream_control.hpp
+@@ -24,6 +24,7 @@
+ #include "server_settings.hpp"
+ 
+ // 3rd party headers
++#ifndef WINDOWS
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wpragmas"
+ #pragma GCC diagnostic ignored "-Wunused-result"
+@@ -37,6 +38,7 @@
+ #endif
+ #include <boost/process.hpp>
+ #pragma GCC diagnostic pop
++#endif
+ #include <boost/asio/any_io_executor.hpp>
+ 
+ // standard headers
+@@ -44,7 +46,9 @@
+ #include <string>
+ 
+ 
++#ifndef WINDOWS
+ namespace bp = boost::process;
++#endif
+ 
+ using json = nlohmann::json;
+ 
+@@ -87,6 +91,7 @@ private:
+ };
+ 
+ 
++#ifndef WINDOWS
+ class ScriptStreamControl : public StreamControl
+ {
+ public:
+@@ -113,5 +118,6 @@ protected:
+     std::string params_;
+     bp::opstream in_;
+ };
++#endif
+ 
+ } // namespace streamreader
+diff --git a/server/streamreader/stream_manager.cpp b/server/streamreader/stream_manager.cpp
+index cb4faa2..40fa0e4 100644
+--- a/server/streamreader/stream_manager.cpp
++++ b/server/streamreader/stream_manager.cpp
+@@ -20,6 +20,10 @@
+ #include "stream_manager.hpp"
+ 
+ // local headers
++#include "common/snap_exception.hpp"
++#include "common/str_compat.hpp"
++#include "tcp_stream.hpp"
++#ifndef WINDOWS
+ #include "airplay_stream.hpp"
+ #ifdef HAS_ALSA
+ #include "alsa_stream.hpp"
+@@ -27,14 +31,12 @@
+ #ifdef HAS_JACK
+ #include "jack_stream.hpp"
+ #endif
+-#include "common/snap_exception.hpp"
+-#include "common/str_compat.hpp"
+ #include "file_stream.hpp"
+ #include "librespot_stream.hpp"
+ #include "meta_stream.hpp"
+ #include "pipe_stream.hpp"
+ #include "process_stream.hpp"
+-#include "tcp_stream.hpp"
++#endif
+ 
+ // 3rd party headers
+ 
+@@ -87,6 +89,16 @@ PcmStreamPtr StreamManager::addStream(StreamUri& streamUri)
+         listener = nullptr;
+     }
+ 
++#ifdef WINDOWS
++    if (streamUri.scheme == "tcp")
++    {
++        stream = make_shared<TcpStream>(listener, io_context_, settings_, streamUri);
++    }
++    else
++    {
++        throw SnapException("Unsupported Windows server MVP stream type: " + streamUri.scheme);
++    }
++#else
+     if (streamUri.scheme == "pipe")
+     {
+         stream = make_shared<PipeStream>(listener, io_context_, settings_, streamUri);
+@@ -139,6 +151,7 @@ PcmStreamPtr StreamManager::addStream(StreamUri& streamUri)
+     {
+         throw SnapException("Unknown stream type: " + streamUri.scheme);
+     }
++#endif
+ 
+     if (stream)
+     {
+diff --git a/server/streamreader/tcp_stream.cpp b/server/streamreader/tcp_stream.cpp
+index 1ec68d6..ed3fd75 100644
+--- a/server/streamreader/tcp_stream.cpp
++++ b/server/streamreader/tcp_stream.cpp
+@@ -64,7 +64,7 @@ TcpStream::TcpStream(PcmStream::Listener* pcmListener, boost::asio::io_context&
+ 
+     LOG(INFO, LOG_TAG) << "TcpStream host: " << host_ << ", port: " << port_ << ", is server: " << is_server_ << "\n";
+     if (is_server_)
+-        acceptor_ = make_unique<tcp::acceptor>(strand_, tcp::endpoint(boost::asio::ip::address::from_string(host_), port_));
++        acceptor_ = make_unique<tcp::acceptor>(strand_, tcp::endpoint(boost::asio::ip::make_address(host_), port_));
+ }
+ 
+ 
+@@ -93,7 +93,7 @@ void TcpStream::connect()
+     else
+     {
+         stream_ = make_unique<tcp::socket>(strand_);
+-        boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::address::from_string(host_), port_);
++        boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::make_address(host_), port_);
+         stream_->async_connect(endpoint,
+                                [this](const boost::system::error_code& ec)
+                                {
