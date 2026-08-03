@@ -1,0 +1,94 @@
+--- a/server/control_server.hpp
++++ b/server/control_server.hpp
+@@ -25,6 +25,7 @@
+ // 3rd party headers
+ #include <boost/asio/io_context.hpp>
+ #include <boost/asio/ip/tcp.hpp>
++#include <boost/asio/strand.hpp>
+ 
+ // standard headers
+ #include <memory>
+--- a/server/snapserver.cpp
++++ b/server/snapserver.cpp
+@@ -35,9 +35,11 @@
+ 
+ // 3rd party headers
+ #include <boost/asio/ip/host_name.hpp>
++#include <boost/asio/signal_set.hpp>
+ 
+ // standard headers
+ #include <chrono>
++#include <csignal>
+ #include <memory>
+ #ifndef WINDOWS
+ #include <sys/resource.h>
+--- a/server/stream_server.cpp
++++ b/server/stream_server.cpp
+@@ -202,11 +202,17 @@
+ {
+     try
+     {
++#ifdef WINDOWS
++        const DWORD timeout_ms = 5000;
++        setsockopt(socket.native_handle(), SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
++        setsockopt(socket.native_handle(), SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
++#else
+         struct timeval tv;
+         tv.tv_sec = 5;
+         tv.tv_usec = 0;
+         setsockopt(socket.native_handle(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+         setsockopt(socket.native_handle(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
++#endif
+ 
+         /// experimental: turn on tcp::no_delay
+         socket.set_option(tcp::no_delay(true));
+@@ -231,7 +237,7 @@
+         {
+             LOG(INFO, LOG_TAG) << "Creating stream acceptor for address: " << address << ", port: " << settings_.stream.port << "\n";
+             acceptor_.emplace_back(make_unique<tcp::acceptor>(boost::asio::make_strand(io_context_.get_executor()),
+-                                                              tcp::endpoint(boost::asio::ip::address::from_string(address), settings_.stream.port)));
++                                                              tcp::endpoint(boost::asio::ip::make_address(address), settings_.stream.port)));
+         }
+         catch (const boost::system::system_error& e)
+         {
+--- a/server/stream_server.hpp
++++ b/server/stream_server.hpp
+@@ -29,6 +29,7 @@
+ // 3rd party headers
+ #include <boost/asio/io_context.hpp>
+ #include <boost/asio/steady_timer.hpp>
++#include <boost/asio/strand.hpp>
+ 
+ // standard headers
+ #include <memory>
+--- a/server/stream_session_tcp.cpp
++++ b/server/stream_session_tcp.cpp
+@@ -24,6 +24,8 @@
+ #include "common/message/pcm_chunk.hpp"
+ 
+ // 3rd party headers
++#include <boost/asio/read.hpp>
++#include <boost/asio/write.hpp>
+ 
+ // standard headers
+ #include <iostream>
+--- a/server/streamreader/asio_stream.hpp
++++ b/server/streamreader/asio_stream.hpp
+@@ -28,6 +28,7 @@
+ #include <boost/asio/io_context.hpp>
+ #include <boost/asio/read.hpp>
+ #include <boost/asio/steady_timer.hpp>
++#include <boost/asio/strand.hpp>
+ 
+ // standard headers
+ 
+--- a/server/streamreader/stream_control.cpp
++++ b/server/streamreader/stream_control.cpp
+@@ -25,6 +25,7 @@
+ #include "common/utils/file_utils.hpp"
+ 
+ // 3rd party headers
++#include <boost/asio/post.hpp>
+ #include <boost/asio/read_until.hpp>
+ 
+ // standard headers
