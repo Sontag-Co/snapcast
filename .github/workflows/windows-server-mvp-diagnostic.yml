@@ -1,0 +1,219 @@
+name: Windows server MVP diagnostic
+
+on:
+  push:
+    branches: [feature/windows-snapserver-mvp]
+    paths:
+      - '.github/workflows/windows-server-mvp-diagnostic.yml'
+      - 'CMakeLists.txt'
+      - 'common/**'
+      - 'server/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: feature/windows-snapserver-mvp
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Locate hosted Windows toolchain
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+
+          cmake --version
+          git --version
+          Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022' -Directory -ErrorAction SilentlyContinue | Select-Object FullName
+
+          $boostCandidates = @(
+            $env:BOOST_ROOT,
+            'C:\local\boost_1_87_0',
+            'C:\local\boost_1_86_0',
+            'C:\local\boost_1_85_0',
+            'C:\local\boost_1_84_0',
+            'C:\local\boost_1_83_0',
+            'C:\local\boost_1_82_0'
+          ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          $boost = $boostCandidates | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'boost\version.hpp') -PathType Leaf } | Select-Object -First 1
+          if ([string]::IsNullOrWhiteSpace($boost)) {
+            $boost = Get-ChildItem 'C:\local' -Directory -Filter 'boost_*' -ErrorAction SilentlyContinue |
+              Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'boost\version.hpp') -PathType Leaf } |
+              Sort-Object Name -Descending |
+              Select-Object -ExpandProperty FullName -First 1
+          }
+          if ([string]::IsNullOrWhiteSpace($boost)) { throw 'Boost headers were not found on windows-latest.' }
+          Write-Host "BOOST_ROOT=$boost"
+          "BOOST_ROOT=$boost" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Apply temporary Windows MVP CMake reduction
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          $rootPath = Join-Path $env:GITHUB_WORKSPACE 'CMakeLists.txt'
+          $root = Get-Content -LiteralPath $rootPath -Raw
+          $oldServerOption = @'
+          if(NOT WIN32)
+            option(BUILD_SERVER "Build Snapserver" ON) # no Windows server for now
+          endif()
+          '@ -replace '^          ', '' -replace "`r?`n          ", "`n"
+          $newServerOption = @'
+          option(BUILD_SERVER "Build Snapserver" ON)
+          option(BUILD_WINDOWS_SERVER_MVP "Build the minimal native Windows Snapserver" OFF)
+          if(WIN32 AND BUILD_SERVER AND NOT BUILD_WINDOWS_SERVER_MVP)
+            message(FATAL_ERROR "Windows snapserver requires -DBUILD_WINDOWS_SERVER_MVP=ON")
+          endif()
+          '@ -replace '^          ', '' -replace "`r?`n          ", "`n"
+          if (-not $root.Contains($oldServerOption)) { throw 'Could not locate BUILD_SERVER gate.' }
+          $root = $root.Replace($oldServerOption, $newServerOption)
+
+          $codecGate = "if(WIN32)`n  include(FindPackageHandleStandardArgs)"
+          if (-not $root.Contains($codecGate)) { throw 'Could not locate Windows codec dependency block.' }
+          $root = $root.Replace($codecGate, "if(WIN32 AND NOT BUILD_WINDOWS_SERVER_MVP)`n  include(FindPackageHandleStandardArgs)")
+
+          $windowsDefs = @'
+          if(WIN32 AND BUILD_WINDOWS_SERVER_MVP)
+            add_compile_definitions(
+              NTDDI_VERSION=0x06020000
+              _WIN32_WINNT=0x0602
+              WINVER=0x0602
+              WINDOWS
+              WIN32_LEAN_AND_MEAN
+              NOMINMAX
+              UNICODE
+              _UNICODE
+              _CRT_SECURE_NO_WARNINGS)
+          endif()
+
+          '@ -replace '^          ', '' -replace "`r?`n          ", "`n"
+          $marker = "list(APPEND CMAKE_REQUIRED_INCLUDES"
+          $root = $root.Replace($marker, $windowsDefs + $marker)
+          Set-Content -LiteralPath $rootPath -Value $root -Encoding utf8NoBOM
+
+          $serverPath = Join-Path $env:GITHUB_WORKSPACE 'server\CMakeLists.txt'
+          $server = Get-Content -LiteralPath $serverPath -Raw
+          $minimalSources = @'
+          if(WIN32 AND BUILD_WINDOWS_SERVER_MVP)
+            set(SERVER_SOURCES
+                config.cpp
+                control_server.cpp
+                control_session_tcp.cpp
+                snapserver.cpp
+                server.cpp
+                stream_server.cpp
+                stream_session.cpp
+                stream_session_tcp.cpp
+                encoder/encoder_factory.cpp
+                encoder/pcm_encoder.cpp
+                encoder/null_encoder.cpp
+                streamreader/base64.cpp
+                streamreader/control_error.cpp
+                streamreader/stream_control.cpp
+                streamreader/stream_uri.cpp
+                streamreader/stream_manager.cpp
+                streamreader/pcm_stream.cpp
+                streamreader/tcp_stream.cpp
+                streamreader/watchdog.cpp
+                streamreader/properties.cpp
+                streamreader/metadata.cpp)
+          else()
+          '@ -replace '^          ', '' -replace "`r?`n          ", "`n"
+          $server = $server.Replace('set(SERVER_SOURCES', $minimalSources + 'set(SERVER_SOURCES', 1)
+          $firstClose = $server.IndexOf("`n`nset(SERVER_LIBRARIES")
+          if ($firstClose -lt 0) { throw 'Could not locate end of SERVER_SOURCES.' }
+          $server = $server.Insert($firstClose, "`nendif()")
+          Set-Content -LiteralPath $serverPath -Value $server -Encoding utf8NoBOM
+
+          Write-Host '=== Root CMake Windows gates ==='
+          Select-String -Path $rootPath -Pattern 'BUILD_SERVER|BUILD_WINDOWS_SERVER_MVP|FindPackageHandleStandardArgs|NOMINMAX' -Context 1,2
+          Write-Host '=== Server sources prefix ==='
+          Get-Content -LiteralPath $serverPath -TotalCount 80
+
+      - name: Configure Windows PCM server
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Path artifacts\windows-server-diagnostic -Force | Out-Null
+          $args = @(
+            '-S','.',
+            '-B','build/windows-server-mvp',
+            '-G','Visual Studio 17 2022',
+            '-A','x64',
+            '-DBUILD_SERVER=ON',
+            '-DBUILD_CLIENT=OFF',
+            '-DBUILD_WINDOWS_SERVER_MVP=ON',
+            '-DBUILD_SHARED_LIBS=OFF',
+            '-DBUILD_STATIC_LIBS=ON',
+            '-DBUILD_TESTS=OFF',
+            '-DBUILD_WITH_FLAC=OFF',
+            '-DBUILD_WITH_VORBIS=OFF',
+            '-DBUILD_WITH_TREMOR=OFF',
+            '-DBUILD_WITH_OPUS=OFF',
+            '-DBUILD_WITH_AVAHI=OFF',
+            '-DBUILD_WITH_EXPAT=OFF',
+            '-DBUILD_WITH_PULSE=OFF',
+            '-DBUILD_WITH_JACK=OFF',
+            "-DBOOST_ROOT=$env:BOOST_ROOT",
+            "-DBoost_ROOT=$env:BOOST_ROOT"
+          )
+          & cmake @args 2>&1 | Tee-Object -FilePath artifacts\windows-server-diagnostic\configure.log
+          $code = $LASTEXITCODE
+          "CONFIGURE_EXIT_CODE=$code" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          exit 0
+
+      - name: Build Windows PCM server
+        if: env.CONFIGURE_EXIT_CODE == '0'
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Continue'
+          cmake --build build/windows-server-mvp --config Release --target snapserver -- /m 2>&1 |
+            Tee-Object -FilePath artifacts\windows-server-diagnostic\build.log
+          $code = $LASTEXITCODE
+          "BUILD_EXIT_CODE=$code" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          exit 0
+
+      - name: Summarize diagnostic
+        if: always()
+        shell: powershell
+        run: |
+          $configure = if ($env:CONFIGURE_EXIT_CODE) { $env:CONFIGURE_EXIT_CODE } else { 'not-run' }
+          $build = if ($env:BUILD_EXIT_CODE) { $env:BUILD_EXIT_CODE } else { 'not-run' }
+          @"
+          # Windows Snapserver MVP diagnostic
+
+          - Configure exit code: $configure
+          - Build exit code: $build
+          - Runner: $env:RUNNER_NAME
+          - Boost: $env:BOOST_ROOT
+          "@ | Set-Content artifacts\windows-server-diagnostic\summary.md -Encoding utf8NoBOM
+          Get-Content artifacts\windows-server-diagnostic\summary.md
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-server-mvp-diagnostic
+          path: artifacts/windows-server-diagnostic
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Fail when configure or build failed
+        if: always()
+        shell: powershell
+        run: |
+          if ($env:CONFIGURE_EXIT_CODE -ne '0') { throw "CMake configure failed: $env:CONFIGURE_EXIT_CODE" }
+          if ($env:BUILD_EXIT_CODE -ne '0') { throw "Snapserver build failed: $env:BUILD_EXIT_CODE" }
