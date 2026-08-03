@@ -1,0 +1,196 @@
+name: Windows server MVP
+
+on:
+  push:
+    branches: [feature/windows-snapserver-mvp]
+    paths:
+      - '.github/workflows/windows-server-mvp.yml'
+      - 'CMakeLists.txt'
+      - 'common/**'
+      - 'server/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout implementation branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: feature/windows-snapserver-mvp
+          fetch-depth: 0
+
+      - name: Locate hosted toolchain and Boost
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          cmake --version
+          git --version
+          python --version
+          $boost = Get-ChildItem 'C:\local' -Directory -Filter 'boost_*' -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'boost\version.hpp') -PathType Leaf } |
+            Sort-Object Name -Descending |
+            Select-Object -ExpandProperty FullName -First 1
+          if ([string]::IsNullOrWhiteSpace($boost)) { throw 'Boost headers were not found on windows-latest.' }
+          Write-Host "BOOST_ROOT=$boost"
+          "BOOST_ROOT=$boost" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Apply temporary minimal Windows server graph
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          root_path = Path('CMakeLists.txt')
+          root = root_path.read_text(encoding='utf-8').replace('\r\n', '\n')
+          old = '''if(NOT WIN32)
+            option(BUILD_SERVER "Build Snapserver" ON) # no Windows server for now
+          endif()'''
+          new = '''option(BUILD_SERVER "Build Snapserver" ON)
+          option(BUILD_WINDOWS_SERVER_MVP "Build the minimal native Windows Snapserver" OFF)
+          if(WIN32 AND BUILD_SERVER AND NOT BUILD_WINDOWS_SERVER_MVP)
+            message(FATAL_ERROR "Windows snapserver requires -DBUILD_WINDOWS_SERVER_MVP=ON")
+          endif()'''
+          if old not in root:
+              raise SystemExit('BUILD_SERVER gate not found')
+          root = root.replace(old, new, 1)
+
+          codec_gate = 'if(WIN32)\n  include(FindPackageHandleStandardArgs)'
+          if codec_gate not in root:
+              raise SystemExit('Windows codec block not found')
+          root = root.replace(codec_gate, 'if(WIN32 AND NOT BUILD_WINDOWS_SERVER_MVP)\n  include(FindPackageHandleStandardArgs)', 1)
+
+          marker = 'list(APPEND CMAKE_REQUIRED_INCLUDES'
+          defs = '''if(WIN32 AND BUILD_WINDOWS_SERVER_MVP)
+            add_compile_definitions(
+              NTDDI_VERSION=0x06020000
+              _WIN32_WINNT=0x0602
+              WINVER=0x0602
+              WINDOWS
+              WIN32_LEAN_AND_MEAN
+              NOMINMAX
+              UNICODE
+              _UNICODE
+              _CRT_SECURE_NO_WARNINGS)
+          endif()
+
+          '''
+          if marker not in root:
+              raise SystemExit('CMAKE_REQUIRED_INCLUDES marker not found')
+          root = root.replace(marker, defs + marker, 1)
+          root_path.write_text(root, encoding='utf-8', newline='\n')
+
+          server_path = Path('server/CMakeLists.txt')
+          server = server_path.read_text(encoding='utf-8').replace('\r\n', '\n')
+          start = server.index('set(SERVER_SOURCES')
+          end = server.index('\n\nset(SERVER_LIBRARIES', start)
+          original = server[start:end]
+          minimal = '''if(WIN32 AND BUILD_WINDOWS_SERVER_MVP)
+            set(SERVER_SOURCES
+                config.cpp
+                control_server.cpp
+                control_session_tcp.cpp
+                snapserver.cpp
+                server.cpp
+                stream_server.cpp
+                stream_session.cpp
+                stream_session_tcp.cpp
+                encoder/encoder_factory.cpp
+                encoder/pcm_encoder.cpp
+                encoder/null_encoder.cpp
+                streamreader/base64.cpp
+                streamreader/control_error.cpp
+                streamreader/stream_control.cpp
+                streamreader/stream_uri.cpp
+                streamreader/stream_manager.cpp
+                streamreader/pcm_stream.cpp
+                streamreader/tcp_stream.cpp
+                streamreader/watchdog.cpp
+                streamreader/properties.cpp
+                streamreader/metadata.cpp)
+          else()
+          ''' + original + '''
+          endif()'''
+          server = server[:start] + minimal + server[end:]
+          server_path.write_text(server, encoding='utf-8', newline='\n')
+          '@ | python -
+
+          Write-Host '=== Windows CMake gates ==='
+          Select-String -Path CMakeLists.txt -Pattern 'BUILD_SERVER|BUILD_WINDOWS_SERVER_MVP|NOMINMAX' -Context 1,2
+          Write-Host '=== Minimal source graph ==='
+          Get-Content server\CMakeLists.txt -TotalCount 75
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifacts\windows-server-mvp -Force | Out-Null
+          $ErrorActionPreference = 'Continue'
+          cmake -S . -B build/windows-server-mvp -G 'Visual Studio 17 2022' -A x64 `
+            -DBUILD_SERVER=ON `
+            -DBUILD_CLIENT=OFF `
+            -DBUILD_WINDOWS_SERVER_MVP=ON `
+            -DBUILD_SHARED_LIBS=OFF `
+            -DBUILD_STATIC_LIBS=ON `
+            -DBUILD_TESTS=OFF `
+            -DBUILD_WITH_FLAC=OFF `
+            -DBUILD_WITH_VORBIS=OFF `
+            -DBUILD_WITH_TREMOR=OFF `
+            -DBUILD_WITH_OPUS=OFF `
+            -DBUILD_WITH_AVAHI=OFF `
+            -DBUILD_WITH_EXPAT=OFF `
+            -DBUILD_WITH_PULSE=OFF `
+            -DBUILD_WITH_JACK=OFF `
+            -DBOOST_ROOT="$env:BOOST_ROOT" `
+            -DBoost_ROOT="$env:BOOST_ROOT" 2>&1 |
+            Tee-Object artifacts\windows-server-mvp\configure.log
+          "CONFIGURE_EXIT_CODE=$LASTEXITCODE" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          exit 0
+
+      - name: Build
+        if: env.CONFIGURE_EXIT_CODE == '0'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          cmake --build build/windows-server-mvp --config Release --target snapserver -- /m 2>&1 |
+            Tee-Object artifacts\windows-server-mvp\build.log
+          "BUILD_EXIT_CODE=$LASTEXITCODE" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          exit 0
+
+      - name: Summarize
+        if: always()
+        shell: pwsh
+        run: |
+          $configure = if ($env:CONFIGURE_EXIT_CODE) { $env:CONFIGURE_EXIT_CODE } else { 'not-run' }
+          $build = if ($env:BUILD_EXIT_CODE) { $env:BUILD_EXIT_CODE } else { 'not-run' }
+          @"
+          # Windows Snapserver MVP diagnostic
+
+          - Configure exit code: $configure
+          - Build exit code: $build
+          - Runner: $env:RUNNER_NAME
+          - Boost: $env:BOOST_ROOT
+          "@ | Set-Content artifacts\windows-server-mvp\summary.md -Encoding utf8NoBOM
+          Get-Content artifacts\windows-server-mvp\summary.md
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-server-mvp-diagnostic
+          path: artifacts/windows-server-mvp
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Enforce diagnostic result
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:CONFIGURE_EXIT_CODE -ne '0') { throw "Configure failed with exit code $env:CONFIGURE_EXIT_CODE" }
+          if ($env:BUILD_EXIT_CODE -ne '0') { throw "Build failed with exit code $env:BUILD_EXIT_CODE" }
