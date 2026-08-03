@@ -92,3 +92,55 @@
  #include <boost/asio/read_until.hpp>
  
  // standard headers
+--- a/server/control_server.cpp
++++ b/server/control_server.cpp
+@@ -22,7 +22,9 @@
+ // local headers
+ #include "common/aixlog.hpp"
+ #include "common/json.hpp"
++#ifndef WINDOWS
+ #include "control_session_http.hpp"
++#endif
+ #include "control_session_tcp.hpp"
+ 
+ // 3rd party headers
+@@ -111,6 +113,7 @@
+             LOG(ERROR, LOG_TAG) << "Error while accepting socket connection: " << ec.message() << "\n";
+     };
+ 
++#ifndef WINDOWS
+     auto accept_handler_http = [this](error_code ec, tcp::socket socket)
+     {
+         if (!ec)
+@@ -118,12 +121,15 @@
+         else
+             LOG(ERROR, LOG_TAG) << "Error while accepting socket connection: " << ec.message() << "\n";
+     };
++#endif
+ 
+     for (auto& acceptor : acceptor_tcp_)
+         acceptor->async_accept(accept_handler_tcp);
+ 
++#ifndef WINDOWS
+     for (auto& acceptor : acceptor_http_)
+         acceptor->async_accept(accept_handler_http);
++#endif
+ }
+ 
+ 
+@@ -175,6 +181,7 @@
+             }
+         }
+     }
++#ifndef WINDOWS
+     if (http_settings_.enabled)
+     {
+         for (const auto& address : http_settings_.bind_to_address)
+@@ -191,6 +198,7 @@
+             }
+         }
+     }
++#endif
+ 
+     startAccept();
+ }
